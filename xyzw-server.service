@@ -1,0 +1,18 @@
+[Unit]
+Description=XYZW Game Server Management System
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/xyzw-server
+ExecStart=/usr/bin/node server/app.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PORT=3000
+StandardOutput=append:/opt/xyzw-server/logs/out.log
+StandardError=append:/opt/xyzw-server/logs/error.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+# 依赖
+node_modules/
+client/node_modules/
+
+# 构建产物
+client/dist/
+
+# 数据与日志
+data/
+logs/
+
+# 环境变量（含密钥，不要上传）
+.env
+
+# 系统
+.DS_Store
+*.pid
