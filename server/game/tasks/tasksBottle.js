@@ -1,7 +1,7 @@
 /**
  * 瓶子/盐罐任务工厂
- * 从参考项目 tasksBottle.js 移植
- * 适配：tokenStore.sendMessageWithPromise(tokenId, cmd, params) → worker.sendMessageWithPromise(cmd, params)
+ * 合并版：一个任务完成 领取+重置，通过 config.mode 控制
+ * mode: "claim_and_reset" (默认) | "claim_only" | "reset_only"
  */
 
 const { getShanghaiISO } = require('../../utils/time');
@@ -12,79 +12,71 @@ function sleep(ms) {
 }
 
 /**
- * 重置盐罐：停止 → 重启 → 领取
+ * 统一罐子管理任务
+ * 流程：
+ *   claim_and_reset: 停止 → 领取盐罐奖励 → 领取灵罐 → 重新开始计时
+ *   claim_only: 领取盐罐奖励 → 领取灵罐
+ *   reset_only: 停止 → 重新开始计时
  */
 function createResetBottles(deps) {
   return async function resetBottles() {
-    const { worker, onLog } = deps;
+    const { worker, onLog, config = {} } = deps;
     const log = (msg, type = 'info') => onLog?.({ time: getShanghaiISO(), message: msg, type });
+    const mode = config.mode || 'claim_and_reset';
 
-    log('开始重置盐罐...');
+    log(`开始罐子管理 (模式: ${mode === 'claim_and_reset' ? '领取+重置' : mode === 'claim_only' ? '仅领取' : '仅重置'})...`);
+
     try {
-      // 停止盐罐
-      log('停止盐罐计时...');
-      const stopResp = await worker.sendMessageWithPromise('bottlehelper_stop', {}, 8000);
-      log(`停止响应: ${JSON.stringify(stopResp?.rawData || stopResp || {})}`);
-      await sleep(500);
-
-      // 重新开始
-      log('重新开始盐罐计时...');
-      const startResp = await worker.sendMessageWithPromise('bottlehelper_start', {}, 8000);
-      log(`开始响应: ${JSON.stringify(startResp?.rawData || startResp || {})}`);
-      await sleep(500);
-
-      // 领取奖励
-      log('领取盐罐奖励...');
-      try {
-        const claimResp = await worker.sendMessageWithPromise('bottlehelper_claim', {}, 8000);
-        log(`领取响应: ${JSON.stringify(claimResp?.rawData || claimResp || {})}`, 'success');
-      } catch (e) {
-        log(`领取盐罐奖励失败（可能无奖励）: ${e.message}`, 'warning');
-      }
-
-      log('盐罐重置完成', 'success');
-      return { success: true, message: '盐罐重置完成' };
-    } catch (error) {
-      log(`盐罐重置失败: ${error.message}`, 'error');
-      throw error;
-    }
-  };
-}
-
-/**
- * 批量领取灵罐
- */
-function createBatchLingGuanZi(deps) {
-  return async function batchlingguanzi() {
-    const { worker, onLog } = deps;
-    const log = (msg, type = 'info') => onLog?.({ time: getShanghaiISO(), message: msg, type });
-
-    log('开始领取灵罐...');
-    try {
-      const result = await worker.sendMessageWithPromise('bottle_getinfo', {}, 8000);
-      await sleep(500);
-
-      const bottles = result?.rawData?.bottles || result?.bottles || [];
-      let claimed = 0;
-
-      for (const bottle of bottles) {
+      // === 重置部分 ===
+      if (mode === 'claim_and_reset' || mode === 'reset_only') {
+        // 停止盐罐计时
+        log('停止盐罐计时...');
         try {
-          await worker.sendMessageWithPromise('bottle_claim', { bottleId: bottle.id }, 8000);
+          await worker.sendMessageWithPromise('bottlehelper_stop', {}, 8000);
           await sleep(500);
-          claimed++;
-          log(`领取灵罐 ${bottle.id} 成功`, 'success');
+          log('盐罐已停止', 'success');
         } catch (e) {
-          log(`领取灵罐 ${bottle.id} 失败: ${e.message}`, 'warning');
+          log(`停止盐罐失败: ${e.message}`, 'warning');
         }
       }
 
-      log(`灵罐领取完成，共领取 ${claimed} 个`, 'success');
-      return { success: true, claimed };
+      // === 领取部分 ===
+      if (mode === 'claim_and_reset' || mode === 'claim_only') {
+        // 领取盐罐奖励
+        log('领取盐罐奖励...');
+        try {
+          const claimResp = await worker.sendMessageWithPromise('bottlehelper_claim', {}, 8000);
+          await sleep(500);
+          const reward = claimResp?.rawData || claimResp;
+          log(`盐罐奖励领取成功: ${JSON.stringify(reward)}`, 'success');
+        } catch (e) {
+          log(`领取盐罐奖励失败（可能无奖励可领）: ${e.message}`, 'warning');
+        }
+
+        // 灵罐领取已移除（bottle_getinfo/bottle_claim 指令已失效）
+      }
+
+      // === 重置后半段 ===
+      if (mode === 'claim_and_reset' || mode === 'reset_only') {
+        // 重新开始盐罐计时
+        log('重新开始盐罐计时...');
+        try {
+          const startResp = await worker.sendMessageWithPromise('bottlehelper_start', {}, 8000);
+          await sleep(500);
+          log('盐罐计时已重新开始', 'success');
+        } catch (e) {
+          log(`重新开始盐罐失败: ${e.message}`, 'error');
+          throw e;
+        }
+      }
+
+      log('罐子管理完成', 'success');
+      return { success: true, message: `罐子管理完成 (${mode})` };
     } catch (error) {
-      log(`灵罐领取失败: ${error.message}`, 'error');
+      log(`罐子管理失败: ${error.message}`, 'error');
       throw error;
     }
   };
 }
 
-module.exports = { createResetBottles, createBatchLingGuanZi };
+module.exports = { createResetBottles };

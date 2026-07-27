@@ -8,13 +8,13 @@ const { DailyTaskRunner, BottleResetTask, DEFAULT_SETTINGS } = require('../taskR
 const { getShanghaiISO } = require('../../utils/time');
 
 // 瓶子
-const { createResetBottles, createBatchLingGuanZi } = require('./tasksBottle');
+const { createResetBottles } = require('./tasksBottle');
 // 挂机
 const { createClaimHangUpRewards, createBatchAddHangUpTime, createBatchStudy, createBatchClubSign } = require('./tasksHangUp');
 // 爬塔
-const { createClimbTower, createClimbWeirdTower, createBatchClaimFreeEnergy } = require('./tasksTower');
+const { createClimbTower, createClimbWeirdTower, createBatchClaimFreeEnergy, createSkinChallenge } = require('./tasksTower');
 // 竞技场
-const { createBatchArenaFight, createBatchTopUpFish, createBatchTopUpArena } = require('./tasksArena');
+const { createBatchArenaFight } = require('./tasksArena');
 // 道具
 const { createBatchOpenBox, createBatchClaimBoxPointReward, createBatchFish, createBatchRecruit, createBatchHeroUpgrade } = require('./tasksItem');
 // 副本
@@ -25,23 +25,6 @@ const { createBatchSmartSendCar, createBatchClaimCars } = require('./tasksCar');
 const { createLegionStoreBuyGoods, createLegionStoreBuySkinCoins, createStorePurchase, createCollectionClaimFreeReward } = require('./tasksStore');
 // 珍宝阁
 const { createBatchLegacyClaim, createBatchLegacyGiftSendEnhanced } = require('./tasksLegacy');
-
-// 皮肤挑战
-function createSkinChallenge(deps) {
-  return async function skinChallenge() {
-    const { worker, onLog } = deps;
-    const log = (msg, type = 'info') => onLog?.({ time: getShanghaiISO(), message: msg, type });
-    log('开始皮肤挑战...');
-    try {
-      await worker.sendMessageWithPromise('skin_challenge', {}, 12000);
-      log('皮肤挑战完成', 'success');
-      return { success: true, message: '皮肤挑战完成' };
-    } catch (error) {
-      log(`皮肤挑战失败: ${error.message}`, 'error');
-      throw error;
-    }
-  };
-}
 
 /**
  * 任务类型 → 工厂函数映射表
@@ -55,7 +38,6 @@ const TASK_REGISTRY = {
 
   // 瓶子
   resetBottles: createResetBottles,
-  batchlingguanzi: createBatchLingGuanZi,
 
   // 挂机
   claimHangUpRewards: createClaimHangUpRewards,
@@ -70,8 +52,6 @@ const TASK_REGISTRY = {
 
   // 竞技场
   batcharenafight: createBatchArenaFight,
-  batchTopUpFish: createBatchTopUpFish,
-  batchTopUpArena: createBatchTopUpArena,
 
   // 道具
   batchOpenBox: createBatchOpenBox,

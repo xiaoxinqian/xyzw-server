@@ -4,7 +4,7 @@
  * 核心变更：tokenStore.sendMessageWithPromise(tokenId, cmd, params) → worker.sendMessageWithPromise(cmd, params)
  */
 
-const { getShanghaiISO, isNoLoginPeriod } = require('../utils/time');
+const { getShanghaiISO, isNoLoginPeriod, getShanghaiDayOfWeek, getShanghaiDateStr, getShanghaiHourMin } = require('../utils/time');
 const logger = require('../utils/logger');
 
 // 默认任务配置
@@ -27,20 +27,14 @@ const DAY_BOSS_MAP = [9904, 9905, 9901, 9902, 9903, 9904, 9905];
 
 function getTodayBossId() {
   // 使用上海时间的星期
-  const now = new Date();
-  const shanghaiHour = now.getUTCHours() + 8;
-  const shanghaiDate = new Date(now);
-  if (shanghaiHour >= 24) {
-    shanghaiDate.setUTCDate(shanghaiDate.getUTCDate() + 1);
-  }
-  return DAY_BOSS_MAP[shanghaiDate.getUTCDay()];
+  return DAY_BOSS_MAP[getShanghaiDayOfWeek()];
 }
 
 function isTodayAvailable(statisticsTime) {
   if (!statisticsTime) return true;
-  const today = new Date().toDateString();
-  // 系统返回的时间戳是秒，转成毫秒
-  const recordDate = new Date(statisticsTime * 1000).toDateString();
+  const today = getShanghaiDateStr();
+  // 系统返回的时间戳是秒，转成毫秒，加8小时偏移得到上海时间日期
+  const recordDate = new Date(statisticsTime * 1000 + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
   return today !== recordDate;
 }
 
@@ -156,6 +150,19 @@ class DailyTaskRunner {
     const statistics = roleData.statistics ?? {};
     const statisticsTime = roleData.statisticsTime ?? {};
 
+    // 前置检查：关键日常任务是否全部完成
+    // taskId: 2=分享, 3=好友金币, 4=招募, 5=挂机, 6=点金, 7=开箱, 12=黑市, 13=竞技场, 14=盐罐
+    const KEY_DAILY_TASKS = [2, 3, 4, 5, 6, 7, 12, 13, 14];
+    const allKeyDone = KEY_DAILY_TASKS.every(id => isTaskCompleted(id));
+    if (allKeyDone) {
+      this.log('今日关键日常任务已全部完成，跳过执行', 'success');
+      return { success: true, skipped: true, message: '今日日常任务已完成，跳过' };
+    }
+
+    // 列出未完成的关键任务
+    const pendingTasks = KEY_DAILY_TASKS.filter(id => !isTaskCompleted(id));
+    this.log(`未完成的关键任务: ${pendingTasks.join(', ')}`);
+
     const taskList = [];
 
     // 1. 基础任务
@@ -193,11 +200,18 @@ class DailyTaskRunner {
       taskList.push({ name: '领取盐罐奖励', execute: () => this.executeGameCommand('bottlehelper_claim', {}, '领取盐罐奖励') });
     }
 
-    // 2. 竞技场
+    // 2. 竞技场（6:00-22:00）
     if (!isTaskCompleted(13) && this.settings.arenaEnable) {
       taskList.push({
         name: '竞技场战斗',
         execute: async () => {
+          // 时间限制
+          const hm = getShanghaiHourMin();
+          const hour = parseInt(hm.split(':')[0]);
+          if (hour < 6 || hour >= 22) {
+            this.log(`当前时间 ${hm} 不在竞技场开放时段(6:00-22:00)，跳过`, 'warning');
+            return;
+          }
           this.log('开始竞技场战斗流程');
           await this.switchToFormationIfNeeded(this.settings.arenaFormation, '竞技场阵容');
           await this.executeGameCommand('arena_startarea', {}, '开始竞技场');
@@ -265,9 +279,12 @@ class DailyTaskRunner {
     }
 
     // 5. 免费活动
-    if (isTodayAvailable(statistics['artifact:normal:lottery:time'])) {
-      for (let i = 0; i < 3; i++) {
-        taskList.push({ name: `免费钓鱼 ${i + 1}/3`, execute: () => this.executeGameCommand('artifact_lottery', { lotteryNumber: 1, newFree: true, type: 1 }, `免费钓鱼 ${i + 1}`) });
+    // 免费钓鱼：statistics 存的是次数而非时间戳，不能用 isTodayAvailable
+    const fishCount = statistics['artifact:normal:lottery:time'] ?? 0;
+    const freeFishLeft = 3 - fishCount;
+    if (freeFishLeft > 0) {
+      for (let i = 0; i < freeFishLeft; i++) {
+        taskList.push({ name: `免费钓鱼 ${i + 1}/${freeFishLeft}`, execute: () => this.executeGameCommand('artifact_lottery', { lotteryNumber: 1, newFree: true, type: 1 }, `免费钓鱼 ${i + 1}`) });
       }
     }
 
@@ -279,16 +296,44 @@ class DailyTaskRunner {
     }
 
     for (let i = 0; i < 3; i++) {
-      taskList.push({ name: `领取免费扫荡卷 ${i + 1}/3`, execute: () => this.executeGameCommand('genie_buysweep', {}, `领取免费扫荡卷 ${i + 1}`) });
+      taskList.push({ name: `领取免费扫荡券 ${i + 1}/3`, execute: () => this.executeGameCommand('genie_buysweep', {}, `领取免费扫荡券 ${i + 1}`) });
     }
 
-    // 6. 黑市
+    // 6. 黑市 — 只买5折青铜宝箱
     if (!isTaskCompleted(12) && this.settings.blackMarketPurchase) {
-      taskList.push({ name: '黑市购买1次物品', execute: () => this.executeGameCommand('store_purchase', { goodsId: 1 }, '黑市购买1次物品') });
+      taskList.push({
+        name: '黑市购买5折物品',
+        execute: async () => {
+          // 1. 查询黑市商品列表
+          this.log('查询黑市商品列表...');
+          const listResp = await this.executeGameCommand('store_goodslist', { storeId: 1 }, '查询黑市商品');
+          const rawGoods = listResp?.goodsList || listResp?.rawData?.goodsList || {};
+          // goodsList 是对象 {"1":{discount:0.5},"2":{...}}，转成数组
+          const goods = Object.entries(rawGoods).map(([id, info]) => ({
+            goodsId: parseInt(id),
+            discount: info.discount,
+            buy_quantity: info.buy_quantity,
+          }));
+          if (goods.length === 0) {
+            this.log('黑市商品列表为空，跳过', 'warning');
+            return;
+          }
+          // 2. 找5折商品（discount=0.5），优先选未购买的
+          const halfPrice = goods.filter(g => g.discount <= 0.5 && g.buy_quantity === 0);
+          if (halfPrice.length === 0) {
+            this.log('黑市5折商品已购买或无5折商品，跳过');
+            return;
+          }
+          const target = halfPrice[0]; // goodsId 最小的5折商品
+          this.log(`找到5折商品: goodsId=${target.goodsId}, discount=${target.discount}`);
+          // 3. 购买
+          await this.executeGameCommand('store_buy', { goodsId: target.goodsId }, `购买5折商品(goodsId=${target.goodsId})`);
+        },
+      });
     }
 
-    // 咸王梦境（周日、一、三、四）
-    const dayOfWeek = new Date().getDay();
+    // 咸王梦境（周日、一、三、四）— 使用上海时间
+    const dayOfWeek = getShanghaiDayOfWeek();
     if ([0, 1, 3, 4].includes(dayOfWeek)) {
       taskList.push({ name: '咸王梦境', execute: () => this.executeGameCommand('dungeon_selecthero', { battleTeam: { 0: 107 } }, '咸王梦境') });
     }

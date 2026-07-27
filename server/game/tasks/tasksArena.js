@@ -3,7 +3,7 @@
  * 从参考项目 tasksArena.js 移植
  */
 
-const { getShanghaiISO } = require('../../utils/time');
+const { getShanghaiISO, getShanghaiHourMin } = require('../../utils/time');
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
@@ -39,6 +39,14 @@ function createBatchArenaFight(deps) {
 
     log('开始竞技场战斗...');
     try {
+      // 时间限制：6:00-22:00
+      const hm = getShanghaiHourMin();
+      const hour = parseInt(hm.split(':')[0]);
+      if (hour < 6 || hour >= 22) {
+        log(`当前时间 ${hm} 不在竞技场开放时段(6:00-22:00)，跳过`, 'warning');
+        return { success: false, message: '非竞技场时段' };
+      }
+
       // 检查入场券
       const roleInfo = await worker.sendMessageWithPromise('role_getroleinfo', {}, 10000);
       await sleep(500);
@@ -52,11 +60,22 @@ function createBatchArenaFight(deps) {
         return { success: false, message: '门票不足' };
       }
 
+      // 动态调整战斗次数：不超过门票数
+      const fights = Math.min(fightCount, tickets);
+      log(`将进行 ${fights} 场战斗`);
+
       // 切换阵容
       log(`切换到阵容 ${formation}...`);
+      let originalFormation = null;
       try {
-        await worker.sendMessageWithPromise('presetteam_saveteam', { teamId: formation }, 8000);
-        await sleep(500);
+        // 先获取当前阵容，战斗后切回
+        const teamInfo = await worker.sendMessageWithPromise('presetteam_getinfo', {}, 8000);
+        originalFormation = teamInfo?.rawData?.presetTeamInfo?.useTeamId || teamInfo?.presetTeamInfo?.useTeamId;
+        await sleep(300);
+        if (originalFormation && originalFormation !== formation) {
+          await worker.sendMessageWithPromise('presetteam_saveteam', { teamId: formation }, 8000);
+          await sleep(500);
+        }
       } catch (e) {
         log(`切换阵容失败: ${e.message}`, 'warning');
       }
@@ -69,8 +88,8 @@ function createBatchArenaFight(deps) {
       let winCount = 0;
       let loseCount = 0;
 
-      for (let i = 1; i <= fightCount; i++) {
-        log(`竞技场战斗 ${i}/${fightCount}...`);
+      for (let i = 1; i <= fights; i++) {
+        log(`竞技场战斗 ${i}/${fights}...`);
         try {
           const targets = await worker.sendMessageWithPromise('arena_getareatarget', {}, 8000);
           await sleep(500);
@@ -81,15 +100,32 @@ function createBatchArenaFight(deps) {
             break;
           }
 
-          await worker.sendMessageWithPromise('fight_startareaarena', { targetId }, 10000);
+          const fightResult = await worker.sendMessageWithPromise('fight_startareaarena', { targetId }, 10000);
           await sleep(1000);
 
-          winCount++;
-          log(`竞技场战斗 ${i} 完成`, 'success');
+          // 检查战斗结果
+          const winList = fightResult?.rawData?.winList || fightResult?.winList || [];
+          if (winList[0] === true || winList[0] === 1) {
+            winCount++;
+            log(`竞技场战斗 ${i} 胜利`, 'success');
+          } else {
+            loseCount++;
+            log(`竞技场战斗 ${i} 失败`, 'warning');
+          }
         } catch (e) {
           log(`竞技场战斗 ${i} 失败: ${e.message}`, 'error');
           loseCount++;
           break;
+        }
+      }
+
+      // 切回原阵容
+      if (originalFormation && originalFormation !== formation) {
+        try {
+          await worker.sendMessageWithPromise('presetteam_saveteam', { teamId: originalFormation }, 8000);
+          log('已切回原阵容', 'info');
+        } catch (e) {
+          log(`切回原阵容失败: ${e.message}`, 'warning');
         }
       }
 
@@ -102,67 +138,6 @@ function createBatchArenaFight(deps) {
   };
 }
 
-/**
- * 补充鱼饵
- */
-function createBatchTopUpFish(deps) {
-  return async function batchTopUpFish() {
-    const { worker, onLog, config = {} } = deps;
-    const log = (msg, type = 'info') => onLog?.({ time: getShanghaiISO(), message: msg, type });
-    const count = config.count || 100;
-
-    log('开始补充鱼饵...');
-    try {
-      for (let i = 0; i < count; i++) {
-        try {
-          await worker.sendMessageWithPromise('artifact_buybait', { num: 1 }, 8000);
-          await sleep(500);
-        } catch (e) {
-          log(`补充鱼饵 ${i + 1} 失败: ${e.message}`, 'warning');
-          break;
-        }
-      }
-      log('鱼饵补充完成', 'success');
-      return { success: true, count };
-    } catch (error) {
-      log(`补充鱼饵失败: ${error.message}`, 'error');
-      throw error;
-    }
-  };
-}
-
-/**
- * 补充竞技场次数
- */
-function createBatchTopUpArena(deps) {
-  return async function batchTopUpArena() {
-    const { worker, onLog, config = {} } = deps;
-    const log = (msg, type = 'info') => onLog?.({ time: getShanghaiISO(), message: msg, type });
-    const count = config.count || 1;
-
-    log('开始补充竞技场次数...');
-    try {
-      for (let i = 0; i < count; i++) {
-        try {
-          await worker.sendMessageWithPromise('arena_buycount', { num: 1 }, 8000);
-          await sleep(500);
-          log(`补充竞技场次数 ${i + 1} 成功`, 'success');
-        } catch (e) {
-          log(`补充竞技场次数 ${i + 1} 失败: ${e.message}`, 'warning');
-          break;
-        }
-      }
-      log('竞技场次数补充完成', 'success');
-      return { success: true, count };
-    } catch (error) {
-      log(`补充竞技场次数失败: ${error.message}`, 'error');
-      throw error;
-    }
-  };
-}
-
 module.exports = {
   createBatchArenaFight,
-  createBatchTopUpFish,
-  createBatchTopUpArena,
 };

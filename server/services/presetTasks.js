@@ -19,18 +19,18 @@ const PRESET_TASKS = [
   // === 日常核心 ===
   { name: '日常任务(全流程)', task_type: 'startBatch', schedule_type: 'daily', execute_time: '04:00', interval_minutes: null,
     config: { arenaFormation: 1, bossFormation: 1, bossTimes: 2, claimBottle: true, payRecruit: true, openBox: true, arenaEnable: true, claimHangUp: true, claimEmail: true, blackMarketPurchase: true, freeGachaEnable: true } },
-  { name: '盐罐重置', task_type: 'resetBottles', schedule_type: 'interval', execute_time: null, interval_minutes: 180, config: {} },
+  { name: '盐罐管理', task_type: 'resetBottles', schedule_type: 'interval', execute_time: null, interval_minutes: 180, config: { mode: 'claim_and_reset' } },
   { name: '领取挂机奖励', task_type: 'claimHangUpRewards', schedule_type: 'interval', execute_time: null, interval_minutes: 240, config: {} },
   { name: '一键加钟', task_type: 'batchAddHangUpTime', schedule_type: 'daily', execute_time: '12:00', interval_minutes: null, config: { times: 4 } },
 
   // === 日常补充 ===
   { name: '俱乐部签到', task_type: 'batchclubsign', schedule_type: 'daily', execute_time: '04:10', interval_minutes: null, config: {} },
   { name: '答题', task_type: 'batchStudy', schedule_type: 'daily', execute_time: '04:15', interval_minutes: null, config: {} },
-  { name: '领取罐子', task_type: 'batchlingguanzi', schedule_type: 'daily', execute_time: '04:20', interval_minutes: null, config: {} },
+
 
   // === 商店 ===
   { name: '黑市采购', task_type: 'store_purchase', schedule_type: 'daily', execute_time: '04:05', interval_minutes: null,
-    config: { purchaseList: [] } },
+    config: { purchaseList: [] }, enabled: false },
   { name: '珍宝阁免费领取', task_type: 'collection_claimfreereward', schedule_type: 'daily', execute_time: '04:12', interval_minutes: null, config: {} },
   { name: '购买四圣碎片', task_type: 'legion_storebuygoods', schedule_type: 'daily', execute_time: '05:30', interval_minutes: null, config: {} },
   { name: '购买俱乐部皮肤币', task_type: 'legionStoreBuySkinCoins', schedule_type: 'daily', execute_time: '05:35', interval_minutes: null, config: {} },
@@ -41,15 +41,13 @@ const PRESET_TASKS = [
   { name: '怪异塔免费道具', task_type: 'batchClaimFreeEnergy', schedule_type: 'daily', execute_time: '05:45', interval_minutes: null, config: {} },
 
   // === 竞技场 ===
-  { name: '竞技场战斗', task_type: 'batcharenafight', schedule_type: 'daily', execute_time: '06:00', interval_minutes: null, config: { formation: 1, fightCount: 3 } },
-  { name: '竞技场补齐', task_type: 'batchTopUpArena', schedule_type: 'daily', execute_time: '20:00', interval_minutes: null, config: { count: 1 } },
+  { name: '竞技场战斗', task_type: 'batcharenafight', schedule_type: 'daily', execute_time: '06:00', interval_minutes: null, config: { formation: 1, fightCount: 3 }, enabled: false },
 
   // === 资源 ===
-  { name: '批量开箱', task_type: 'batchOpenBox', schedule_type: 'daily', execute_time: '04:35', interval_minutes: null, config: { boxType: 2001, number: 100 } },
+  { name: '批量开箱', task_type: 'batchOpenBox', schedule_type: 'daily', execute_time: '04:35', interval_minutes: null, config: { boxType: 2001, number: 100 }, enabled: false },
   { name: '领取宝箱积分', task_type: 'batchClaimBoxPointReward', schedule_type: 'daily', execute_time: '04:40', interval_minutes: null, config: {} },
   { name: '批量钓鱼', task_type: 'batchFish', schedule_type: 'daily', execute_time: '04:45', interval_minutes: null, config: { fishType: 1, count: 100 } },
-  { name: '钓鱼补齐', task_type: 'batchTopUpFish', schedule_type: 'cron', execute_time: '5 20 28-31 * *', interval_minutes: null, config: { count: 100 } },
-  { name: '批量招募', task_type: 'batchRecruit', schedule_type: 'daily', execute_time: '04:50', interval_minutes: null, config: { payRecruit: true } },
+  { name: '批量招募', task_type: 'batchRecruit', schedule_type: 'daily', execute_time: '04:50', interval_minutes: null, config: { payRecruit: true }, enabled: false },
   { name: '英雄升星', task_type: 'batchHeroUpgrade', schedule_type: 'daily', execute_time: '04:55', interval_minutes: null, config: { maxStarPerHero: 10 } },
 
   // === 副本 ===
@@ -126,9 +124,9 @@ function applyPresetTasks(accountId, scheduler = null) {
       const accountIds = JSON.stringify([accountId]);
       run(
         `INSERT INTO tasks (id, account_id, account_ids, name, task_type, schedule_type, execute_time, enabled, config, created_at, interval_minutes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, accountId, accountIds, preset.name, preset.task_type, preset.schedule_type,
-         preset.execute_time, JSON.stringify(preset.config), now, preset.interval_minutes]
+         preset.execute_time, preset.enabled === false ? 0 : 1, JSON.stringify(preset.config), now, preset.interval_minutes]
       );
       created++;
 
@@ -138,7 +136,7 @@ function applyPresetTasks(accountId, scheduler = null) {
           id, account_id: accountId, account_ids: accountIds,
           name: preset.name, task_type: preset.task_type,
           schedule_type: preset.schedule_type, execute_time: preset.execute_time,
-          enabled: 1, config: JSON.stringify(preset.config),
+          enabled: preset.enabled === false ? 0 : 1, config: JSON.stringify(preset.config),
           interval_minutes: preset.interval_minutes,
         };
         scheduler.addTask(task);
@@ -155,9 +153,9 @@ function applyPresetTasks(accountId, scheduler = null) {
  * @param {string} accountId
  */
 function removeAccountFromPresets(accountId) {
-  const tasks = all('SELECT id, account_ids FROM tasks WHERE task_type IN (' + 
-    PRESET_TASK_TYPES.size + ' placeholders)'.replace('placeholders', 
-    Array(PRESET_TASK_TYPES.size).fill('?').join(',')), 
+  const placeholders = Array(PRESET_TASK_TYPES.size).fill('?').join(',');
+  const tasks = all(
+    `SELECT id, account_ids FROM tasks WHERE task_type IN (${placeholders})`,
     [...PRESET_TASK_TYPES]
   );
 

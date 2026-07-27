@@ -337,9 +337,36 @@ class Worker {
       throw new Error(`Worker 未连接，无法发送命令: ${cmd}`);
     }
 
-    const result = await this.wsClient.sendWithPromise(cmd, params, timeoutMs);
-    this.lastHeartbeatAck = Date.now();
-    return result;
+    // 调试日志：记录发送的指令
+    const paramStr = JSON.stringify(params).slice(0, 100);
+    logger.info('worker', `[${this.accountId}] → 发送指令: ${cmd} ${paramStr}`);
+
+    try {
+      const result = await this.wsClient.sendWithPromise(cmd, params, timeoutMs);
+      this.lastHeartbeatAck = Date.now();
+      
+      // 解码 BON body → 实际数据对象
+      let decoded = result;
+      if (result && typeof result.rawData !== 'undefined') {
+        // ProtoMsg 对象：提取解码后的数据
+        const raw = result.rawData;
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          // 展开到顶层，同时保留 rawData 和元数据
+          decoded = { ...raw, rawData: raw, _raw: result._raw, _cmd: result.cmd, _seq: result.seq };
+        } else {
+          decoded = raw;
+        }
+      }
+      
+      // 调试日志：记录解码后的数据
+      const respStr = JSON.stringify(decoded).slice(0, 2000);
+      logger.info('worker', `[${this.accountId}] ← 响应: ${cmd} ${respStr}`);
+      
+      return decoded;
+    } catch (err) {
+      logger.warn('worker', `[${this.accountId}] ✗ 指令失败: ${cmd} - ${err.message}`);
+      throw err;
+    }
   }
 
   /**

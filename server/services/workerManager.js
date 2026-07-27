@@ -69,7 +69,11 @@ class WorkerManager {
   async stop(accountId) {
     const worker = this.workers.get(accountId);
     if (worker) {
-      await worker.stop();
+      try {
+        await worker.stop();
+      } catch (e) {
+        logger.warn('worker', `stop 异常: ${e.message}`);
+      }
       this.workers.delete(accountId);
       return { success: true };
     }

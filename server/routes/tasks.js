@@ -28,16 +28,24 @@ router.get('/types', (req, res) => {
 // 列出任务
 router.get('/', (req, res) => {
   const tasks = all(`
-    SELECT t.*, ga.name as account_name, ga.user_id
-    FROM tasks t
-    JOIN game_accounts ga ON t.account_id = ga.id
-    WHERE ga.deleted_at IS NULL
+    SELECT t.* FROM tasks t
     ORDER BY t.enabled DESC, t.created_at DESC
   `);
 
-  const filtered = req.user.role === 'admin'
-    ? tasks
-    : tasks.filter(t => t.user_id === req.user.userId);
+  // 多账号模式：通过 account_ids 判断权限和可见性
+  const filtered = tasks.filter(t => {
+    let ids = [];
+    if (t.account_ids) { try { ids = JSON.parse(t.account_ids); } catch (e) {} }
+    if (ids.length === 0 && t.account_id) ids = [t.account_id];
+    if (ids.length === 0) return req.user.role === 'admin'; // 无账号绑定的任务只有管理员可见
+    // 检查至少一个绑定账号属于该用户（或管理员）
+    if (req.user.role === 'admin') return true;
+    for (const accId of ids) {
+      const acc = get('SELECT user_id FROM game_accounts WHERE id = ? AND deleted_at IS NULL', [accId]);
+      if (acc && acc.user_id === req.user.userId) return true;
+    }
+    return false;
+  });
 
   // 解析 account_ids，查所有账号名
   const result = filtered.map(t => {
@@ -66,18 +74,21 @@ router.get('/', (req, res) => {
 
 // 获取单个任务
 router.get('/:id', (req, res) => {
-  const task = get(`
-    SELECT t.*, ga.name as account_name, ga.user_id
-    FROM tasks t
-    JOIN game_accounts ga ON t.account_id = ga.id
-    WHERE t.id = ? AND ga.deleted_at IS NULL
-  `, [req.params.id]);
-
+  const task = get('SELECT * FROM tasks WHERE id = ?', [req.params.id]);
   if (!task) {
     return res.status(404).json({ success: false, message: '任务不存在' });
   }
-  if (req.user.role !== 'admin' && task.user_id !== req.user.userId) {
-    return res.status(403).json({ success: false, message: '无权限' });
+  // 权限检查：通过 account_ids 检查
+  let ids = [];
+  if (task.account_ids) { try { ids = JSON.parse(task.account_ids); } catch (e) {} }
+  if (ids.length === 0 && task.account_id) ids = [task.account_id];
+  if (req.user.role !== 'admin') {
+    let hasAccess = false;
+    for (const accId of ids) {
+      const acc = get('SELECT user_id FROM game_accounts WHERE id = ? AND deleted_at IS NULL', [accId]);
+      if (acc && acc.user_id === req.user.userId) { hasAccess = true; break; }
+    }
+    if (!hasAccess) return res.status(403).json({ success: false, message: '无权限' });
   }
 
   let accountIds = [];
@@ -133,12 +144,21 @@ router.post('/', (req, res) => {
 
 // 更新任务
 router.put('/:id', (req, res) => {
-  const task = get('SELECT t.*, ga.user_id FROM tasks t JOIN game_accounts ga ON t.account_id = ga.id WHERE t.id = ?', [req.params.id]);
+  const task = get('SELECT * FROM tasks WHERE id = ?', [req.params.id]);
   if (!task) {
     return res.status(404).json({ success: false, message: '任务不存在' });
   }
-  if (req.user.role !== 'admin' && task.user_id !== req.user.userId) {
-    return res.status(403).json({ success: false, message: '无权限' });
+  // 权限检查
+  let ids = [];
+  if (task.account_ids) { try { ids = JSON.parse(task.account_ids); } catch (e) {} }
+  if (ids.length === 0 && task.account_id) ids = [task.account_id];
+  if (req.user.role !== 'admin') {
+    let hasAccess = false;
+    for (const accId of ids) {
+      const acc = get('SELECT user_id FROM game_accounts WHERE id = ? AND deleted_at IS NULL', [accId]);
+      if (acc && acc.user_id === req.user.userId) { hasAccess = true; break; }
+    }
+    if (!hasAccess) return res.status(403).json({ success: false, message: '无权限' });
   }
 
   const { name, taskType, scheduleType, executeTime, intervalMinutes, enabled, config, accountIds } = req.body;
@@ -172,12 +192,21 @@ router.put('/:id', (req, res) => {
 
 // 启用/禁用任务
 router.post('/:id/toggle', (req, res) => {
-  const task = get('SELECT t.*, ga.user_id FROM tasks t JOIN game_accounts ga ON t.account_id = ga.id WHERE t.id = ?', [req.params.id]);
+  const task = get('SELECT * FROM tasks WHERE id = ?', [req.params.id]);
   if (!task) {
     return res.status(404).json({ success: false, message: '任务不存在' });
   }
-  if (req.user.role !== 'admin' && task.user_id !== req.user.userId) {
-    return res.status(403).json({ success: false, message: '无权限' });
+  // 权限检查
+  let ids = [];
+  if (task.account_ids) { try { ids = JSON.parse(task.account_ids); } catch (e) {} }
+  if (ids.length === 0 && task.account_id) ids = [task.account_id];
+  if (req.user.role !== 'admin') {
+    let hasAccess = false;
+    for (const accId of ids) {
+      const acc = get('SELECT user_id FROM game_accounts WHERE id = ? AND deleted_at IS NULL', [accId]);
+      if (acc && acc.user_id === req.user.userId) { hasAccess = true; break; }
+    }
+    if (!hasAccess) return res.status(403).json({ success: false, message: '无权限' });
   }
 
   const newEnabled = task.enabled ? 0 : 1;
@@ -193,12 +222,21 @@ router.post('/:id/toggle', (req, res) => {
 
 // 删除任务
 router.delete('/:id', (req, res) => {
-  const task = get('SELECT t.*, ga.user_id FROM tasks t JOIN game_accounts ga ON t.account_id = ga.id WHERE t.id = ?', [req.params.id]);
+  const task = get('SELECT * FROM tasks WHERE id = ?', [req.params.id]);
   if (!task) {
     return res.status(404).json({ success: false, message: '任务不存在' });
   }
-  if (req.user.role !== 'admin' && task.user_id !== req.user.userId) {
-    return res.status(403).json({ success: false, message: '无权限' });
+  // 权限检查
+  let ids = [];
+  if (task.account_ids) { try { ids = JSON.parse(task.account_ids); } catch (e) {} }
+  if (ids.length === 0 && task.account_id) ids = [task.account_id];
+  if (req.user.role !== 'admin') {
+    let hasAccess = false;
+    for (const accId of ids) {
+      const acc = get('SELECT user_id FROM game_accounts WHERE id = ? AND deleted_at IS NULL', [accId]);
+      if (acc && acc.user_id === req.user.userId) { hasAccess = true; break; }
+    }
+    if (!hasAccess) return res.status(403).json({ success: false, message: '无权限' });
   }
 
   run('DELETE FROM tasks WHERE id = ?', [req.params.id]);
@@ -211,12 +249,21 @@ router.delete('/:id', (req, res) => {
 
 // 手动执行任务（支持多账号顺序执行）
 router.post('/:id/run', async (req, res) => {
-  const task = get('SELECT t.*, ga.user_id, ga.name as account_name FROM tasks t JOIN game_accounts ga ON t.account_id = ga.id WHERE t.id = ?', [req.params.id]);
+  const task = get('SELECT * FROM tasks WHERE id = ?', [req.params.id]);
   if (!task) {
     return res.status(404).json({ success: false, message: '任务不存在' });
   }
-  if (req.user.role !== 'admin' && task.user_id !== req.user.userId) {
-    return res.status(403).json({ success: false, message: '无权限' });
+  // 权限检查
+  let ids = [];
+  if (task.account_ids) { try { ids = JSON.parse(task.account_ids); } catch (e) {} }
+  if (ids.length === 0 && task.account_id) ids = [task.account_id];
+  if (req.user.role !== 'admin') {
+    let hasAccess = false;
+    for (const accId of ids) {
+      const acc = get('SELECT user_id FROM game_accounts WHERE id = ? AND deleted_at IS NULL', [accId]);
+      if (acc && acc.user_id === req.user.userId) { hasAccess = true; break; }
+    }
+    if (!hasAccess) return res.status(403).json({ success: false, message: '无权限' });
   }
 
   if (!scheduler) {
@@ -302,12 +349,21 @@ router.post('/run-quick', (req, res) => {
 
 // 获取任务执行日志
 router.get('/:id/logs', (req, res) => {
-  const task = get('SELECT t.*, ga.user_id FROM tasks t JOIN game_accounts ga ON t.account_id = ga.id WHERE t.id = ?', [req.params.id]);
+  const task = get('SELECT * FROM tasks WHERE id = ?', [req.params.id]);
   if (!task) {
     return res.status(404).json({ success: false, message: '任务不存在' });
   }
-  if (req.user.role !== 'admin' && task.user_id !== req.user.userId) {
-    return res.status(403).json({ success: false, message: '无权限' });
+  // 权限检查
+  let ids = [];
+  if (task.account_ids) { try { ids = JSON.parse(task.account_ids); } catch (e) {} }
+  if (ids.length === 0 && task.account_id) ids = [task.account_id];
+  if (req.user.role !== 'admin') {
+    let hasAccess = false;
+    for (const accId of ids) {
+      const acc = get('SELECT user_id FROM game_accounts WHERE id = ? AND deleted_at IS NULL', [accId]);
+      if (acc && acc.user_id === req.user.userId) { hasAccess = true; break; }
+    }
+    if (!hasAccess) return res.status(403).json({ success: false, message: '无权限' });
   }
 
   const page = parseInt(req.query.page) || 1;

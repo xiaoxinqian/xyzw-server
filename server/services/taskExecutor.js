@@ -7,12 +7,35 @@ const { v4: uuidv4 } = require('uuid');
 const { get, run } = require('../database/db');
 const { DailyTaskRunner, DEFAULT_SETTINGS } = require('../game/taskRunner');
 const { createTask, hasTaskType } = require('../game/tasks');
-const { getShanghaiISO, isNoLoginPeriod } = require('../utils/time');
+const { getShanghaiISO, isNoLoginPeriod, getShanghaiDateStr, getShanghaiNow } = require('../utils/time');
 const logger = require('../utils/logger');
 const wsManager = require('./wsManager');
 
 // 执行锁：防止同一账号任务并发执行
 const _executionLocks = new Map(); // accountId → boolean
+
+// 当日已执行记录：防止日常任务重复消耗资源（招募、BOSS等）
+// taskName → Set<accountId>（当天已成功的账号）
+const _dailyExecuted = new Map();
+const DAILY_DEDUP_TASKS = new Set(['startBatch']); // 需要当日去重的任务类型
+
+function _isDailyExecuted(taskName, accountId) {
+  const set = _dailyExecuted.get(taskName);
+  return set ? set.has(accountId) : false;
+}
+
+function _markDailyExecuted(taskName, accountId) {
+  if (!_dailyExecuted.has(taskName)) _dailyExecuted.set(taskName, new Set());
+  _dailyExecuted.get(taskName).add(accountId);
+}
+
+// 每天上海时间 00:00 清空当日记录
+setInterval(() => {
+  const now = getShanghaiNow();
+  if (now.getHours() === 0 && now.getMinutes() < 5) {
+    _dailyExecuted.clear();
+  }
+}, 5 * 60 * 1000);
 
 /**
  * 执行单个账号的每日任务
@@ -29,6 +52,26 @@ async function executeDailyTask(accountId, workerManager, options = {}) {
     logger.warn('task', `账号 ${accountId} 已有任务在执行中，跳过`);
     return { success: false, message: '该账号已有任务在执行中' };
   }
+
+  // 当日重复执行检查（仅自动触发，手动触发允许重跑 — 子任务级别有游戏内检查）
+  if (!manual && DAILY_DEDUP_TASKS.has(taskName)) {
+    if (_isDailyExecuted(taskName, accountId)) {
+      logger.info('task', `账号 ${accountId} 今日已执行过 ${taskName}，自动跳过`);
+      return { success: false, message: '今日已执行过，自动跳过', skipped: true };
+    }
+    // 双重检查：查数据库 task_logs，确保进程重启后也不重复
+    const today = getShanghaiDateStr();
+    const todayLog = get(
+      `SELECT id FROM task_logs WHERE account_id = ? AND task_type = ? AND status = 'success' AND created_at >= ? ORDER BY id DESC LIMIT 1`,
+      [accountId, taskName, today + ' 00:00:00']
+    );
+    if (todayLog) {
+      _markDailyExecuted(taskName, accountId);
+      logger.info('task', `账号 ${accountId} 今日已执行过 ${taskName}（数据库确认），自动跳过`);
+      return { success: false, message: '今日已执行过，自动跳过', skipped: true };
+    }
+  }
+
   _executionLocks.set(accountId, true);
 
   try {
@@ -47,17 +90,19 @@ async function _executeTaskInternal(accountId, workerManager, options, startTime
   // 获取 Worker
   const worker = workerManager.getWorker(accountId);
   if (!worker || worker.status !== 'connected') {
-    // 尝试启动 Worker
-    if (!worker) {
-      const startResult = await workerManager.start(accountId);
-      if (!startResult.success) {
-        await _logTask(accountId, taskName, 'failed', manual, 'Worker 启动失败: ' + (startResult.message || ''), null, startTime);
-        return { success: false, message: 'Worker 启动失败' };
-      }
+    // Worker 不存在或不在连接状态，都尝试启动/重启
+    if (worker) {
+      // 清理残留的 Worker 实例（上次任务可能异常退出留下来的）
+      try { await workerManager.stop(accountId); } catch (e) {}
+    }
+    const startResult = await workerManager.start(accountId);
+    if (!startResult.success) {
+      await _logTask(accountId, taskName, 'failed', manual, 'Worker 启动失败: ' + (startResult.message || ''), null, startTime);
+      return { success: false, message: 'Worker 启动失败' };
     }
 
     // 等待连接
-    const maxWait = 15000;
+    const maxWait = 20000;
     const waited = await _waitForConnection(workerManager, accountId, maxWait);
     if (!waited) {
       await _logTask(accountId, taskName, 'failed', manual, 'Worker 连接超时', null, startTime);
@@ -69,7 +114,7 @@ async function _executeTaskInternal(accountId, workerManager, options, startTime
 
   // 等待角色信息加载完成，确保游戏服务器已建立上下文
   try {
-    await w.waitForReady(15000);
+    await w.waitForReady(20000);
   } catch (e) {
     logger.warn('task', `等待角色就绪超时: ${e.message}，继续执行任务`);
   }
@@ -92,14 +137,23 @@ async function _executeTaskInternal(accountId, workerManager, options, startTime
   if (userId) wsManager.pushToUser(userId, 'task:start', { accountId, taskName, manual, accountName: account?.name });
   wsManager.pushToAdmins('task:start', { accountId, taskName, manual, accountName: account?.name });
 
-  // 创建日志回调
+  // 创建日志回调 — 推 WebSocket + 写 DB
+  const _taskRowForLog = get('SELECT id FROM tasks WHERE task_type = ?', [taskName]);
   const onLog = ({ time, message, type }) => {
     logger.info('task', `[${account?.name || accountId}] ${message}`);
     if (userId) wsManager.pushToUser(userId, 'task:log', { accountId, taskName, message, type, time });
+    // 同步写入 DB（sqlite 很快，不会阻塞）
+    try {
+      run(
+        `INSERT INTO task_logs (task_id, account_id, task_type, status, manual, result, error, duration_ms, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [_taskRowForLog?.id || 'ad-hoc', accountId, taskName, 'log', manual ? 1 : 0, null, `${type}:${message}`, 0, getShanghaiISO()]
+      );
+    } catch (e) { /* 忽略日志写入失败 */ }
   };
 
-  // 从 DB 获取任务配置
-  const taskRow = get('SELECT * FROM tasks WHERE account_id = ? AND task_type = ?', [accountId, taskName]);
+  // 从 DB 获取任务配置：先按 account_ids 包含当前账号查（多账号模式），再回退单账号
+  const taskRow = get('SELECT * FROM tasks WHERE task_type = ?', [taskName]);
   let taskConfig = {};
   if (taskRow?.config) {
     try { taskConfig = JSON.parse(taskRow.config); } catch (e) { taskConfig = {}; }
@@ -115,6 +169,7 @@ async function _executeTaskInternal(accountId, workerManager, options, startTime
     try {
       const result = await runner.run();
       const duration = Date.now() - startTime;
+      if (DAILY_DEDUP_TASKS.has(taskName)) _markDailyExecuted(taskName, accountId);
       await _logTask(accountId, taskName, 'success', manual, JSON.stringify(result), null, startTime);
       if (userId) wsManager.pushToUser(userId, 'task:complete', { accountId, taskName, result, duration });
       wsManager.pushToAdmins('task:complete', { accountId, taskName, result, duration });
@@ -140,6 +195,7 @@ async function _executeTaskInternal(accountId, workerManager, options, startTime
   try {
     const result = await taskFn();
     const duration = Date.now() - startTime;
+    if (DAILY_DEDUP_TASKS.has(taskName)) _markDailyExecuted(taskName, accountId);
     await _logTask(accountId, taskName, 'success', manual, JSON.stringify(result), null, startTime);
     if (userId) wsManager.pushToUser(userId, 'task:complete', { accountId, taskName, result, duration });
     wsManager.pushToAdmins('task:complete', { accountId, taskName, result, duration });
@@ -180,7 +236,7 @@ async function _waitForConnection(workerManager, accountId, maxWait = 15000) {
  */
 async function _logTask(accountId, taskName, status, manual, result, error, startTime) {
   const duration = Date.now() - startTime;
-  const taskRow = get('SELECT id FROM tasks WHERE account_id = ? AND task_type = ?', [accountId, taskName]);
+  const taskRow = get('SELECT id FROM tasks WHERE task_type = ?', [taskName]);
 
   run(
     `INSERT INTO task_logs (task_id, account_id, task_type, status, manual, result, error, duration_ms, created_at)

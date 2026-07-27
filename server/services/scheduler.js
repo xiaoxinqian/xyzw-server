@@ -53,11 +53,8 @@ class TaskScheduler {
       const minutes = task.interval_minutes || 30;
       const intervalMs = minutes * 60 * 1000;
 
-      // 立即执行一次（如果从未执行过）
-      if (!task.last_execute) {
-        logger.info('scheduler', `间隔任务首次立即执行: ${task.name}`);
-        this._executeTask(task);
-      }
+      // 新创建的间隔任务不立即执行，等第一个间隔周期到了再执行
+      // （避免导入账号时凌晨被立即踢上号）
 
       const timer = setInterval(async () => {
         await this._executeTask(task);
@@ -181,7 +178,7 @@ class TaskScheduler {
         logger.info('scheduler', `免登录时段结束，重试: ${task.name}`);
         await this._executeTask(task);
       }
-    }, 30 * 60 * 1000);
+    }, 5 * 60 * 1000);
   }
 
   /**
@@ -256,11 +253,32 @@ class TaskScheduler {
    */
   _updateNextExecute(taskId, cronExpr) {
     try {
-      // 简单计算：当前时间 + 1天的同时间
-      const now = new Date();
-      const next = new Date(now);
-      next.setDate(next.getDate() + 1);
-      const nextStr = getShanghaiISO(next);
+      // 解析 cron 表达式估算下次执行时间
+      // 简化逻辑：如果是 daily 模式（N H * * *），算今天/明天的时间
+      // 如果是 cron 模式，用 cron-parser 估算
+      let nextDate = null;
+
+      const parts = cronExpr.trim().split(/\s+/);
+      if (parts.length === 5 && parts[2] === '*' && parts[3] === '*' && parts[4] === '*') {
+        // daily 模式: M H * * *
+        const minute = parseInt(parts[0]);
+        const hour = parseInt(parts[1]);
+        const now = new Date();
+        // 转上海时间
+        const shanghaiOffset = 8 * 60 * 60 * 1000;
+        const nowShanghai = new Date(now.getTime() + shanghaiOffset + now.getTimezoneOffset() * 60000);
+        nextDate = new Date(nowShanghai);
+        nextDate.setUTCHours(hour, minute, 0, 0);
+        // 如果今天的时间已过，算明天
+        if (nextDate.getTime() <= nowShanghai.getTime()) {
+          nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+        }
+      } else {
+        // 复杂 cron 表达式，简单加1天作为估算（不精确但比没有好）
+        nextDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      }
+
+      const nextStr = getShanghaiISO(nextDate);
       run('UPDATE tasks SET next_execute = ? WHERE id = ?', [nextStr, taskId]);
     } catch (err) {
       // 忽略计算错误
@@ -272,12 +290,9 @@ class TaskScheduler {
    */
   getStatus() {
     const tasks = all(`
-      SELECT t.id, t.name, t.task_type, t.enabled, t.execute_time, t.last_execute, t.next_execute,
-             ga.name as account_name
-      FROM tasks t
-      JOIN game_accounts ga ON t.account_id = ga.id
-      WHERE ga.deleted_at IS NULL
-      ORDER BY t.enabled DESC, t.next_execute ASC
+      SELECT id, name, task_type, enabled, execute_time, last_execute, next_execute
+      FROM tasks
+      ORDER BY enabled DESC, next_execute ASC
     `);
 
     return {

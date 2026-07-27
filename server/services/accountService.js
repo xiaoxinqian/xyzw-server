@@ -54,19 +54,13 @@ function getAccount(accountId, userId, role) {
  * @returns {object} 创建结果
  */
 async function importByBin(userId, name, binBuffer, importMethod = 'bin', options = {}) {
-  // 1. 生成 token ID
-  const tokenId = getTokenId(binBuffer);
+  const { g_utils } = require('../game/bonProtocol');
 
-  // 2. 调用 authuser 获取 token
-  let tokenStr;
-  try {
-    tokenStr = await transformToken(binBuffer);
-  } catch (err) {
-    logger.error('account', `Token获取失败: ${name}`, { error: err.message }, null);
-    return { success: false, message: `Token获取失败: ${err.message}` };
-  }
+  // 1. 解析原始 bin 数据（用于后续为每个角色重新编码）
+  const binMsg = g_utils.parse(binBuffer);
+  const originalBinData = binMsg._raw;
 
-  // 3. 获取服务器列表（可能包含多个角色）
+  // 2. 获取服务器列表（可能包含多个角色）
   let roles = [];
   try {
     const serverListStr = await getServerList(binBuffer);
@@ -76,34 +70,46 @@ async function importByBin(userId, name, binBuffer, importMethod = 'bin', option
     logger.warn('account', `获取服务器列表失败: ${name}`, { error: err.message });
   }
 
-  // 如果指定了 serverId/roleId，过滤角色
-  if (options.serverId != null) {
-    roles = roles.filter(r => r.serverId === options.serverId);
-  }
-  if (options.roleId != null) {
-    roles = roles.filter(r => r.roleId === options.roleId);
-  }
+  // 按选中角色过滤
   if (options.selectedRoles && Array.isArray(options.selectedRoles) && options.selectedRoles.length > 0) {
     roles = roles.filter(r => options.selectedRoles.includes(r.roleId));
   }
 
-  // 如果没有角色信息，创建单个账号
+  // 如果没有角色信息，用原始 bin 创建单个账号
   if (roles.length === 0) {
-    roles = [{ serverId: null, roleId: null }];
+    roles = [{ serverId: originalBinData?.serverId, roleId: null, name: null }];
   }
-
-  // 4. 加密存储（bin 和 token 对所有账号相同）
-  const encryptedBin = encryptBuffer(binBuffer);
-  const encryptedToken = encrypt(tokenStr);
 
   const results = [];
 
   for (let i = 0; i < roles.length; i++) {
     const role = roles[i];
-    // 默认名称：区服号_角色名，用户可后续修改
+
+    // 3. 为每个角色创建独立的 bin（替换 serverId）
+    let roleBinBuffer;
+    if (role.serverId && originalBinData && role.serverId !== originalBinData.serverId) {
+      const newBinData = { ...originalBinData, serverId: role.serverId };
+      roleBinBuffer = Buffer.from(g_utils.encode(newBinData));
+    } else {
+      roleBinBuffer = binBuffer;
+    }
+
+    // 4. 为每个角色独立获取 token
+    let tokenStr;
+    try {
+      tokenStr = await transformToken(roleBinBuffer);
+    } catch (err) {
+      logger.error('account', `Token获取失败: ${role.name || i}`, { error: err.message });
+      results.push({ success: false, message: `Token获取失败: ${err.message}`, name: role.name });
+      continue;
+    }
+
+    // 5. 加密存储（每个角色独立的 bin 和 token）
+    const encryptedBin = encryptBuffer(roleBinBuffer);
+    const encryptedToken = encrypt(tokenStr);
+
     const roleDisplay = role.name || role.roleId || `角色${i + 1}`;
-    const serverNum = role.serverId ? Number(role.serverId) - 27 : 0;
-    const accountName = name ? (roles.length > 1 ? `${name}_${roleDisplay}` : name) : `${serverNum || '未知'}_${roleDisplay}`;
+    const accountName = name ? (roles.length > 1 ? `${name}_${roleDisplay}` : name) : `${role.serverId || '未知'}_${roleDisplay}`;
     const id = uuidv4();
 
     run(
@@ -240,12 +246,12 @@ async function previewBinRoles(binBuffer) {
     const serverList = JSON.parse(serverListStr);
     const roleList = Object.values(serverList);
     for (const r of roleList) {
-      const serverNum = r.serverId ? Number(r.serverId) - 27 : 0;
+      const sid = r.serverId ? Number(r.serverId) : 0;
       roles.push({
         roleId: r.roleId,
         serverId: r.serverId,
-        serverNum, // 显示用：serverId - 27
-        serverLabel: serverNum > 0 ? `${serverNum}服` : '未知',
+        serverNum: sid,
+        serverLabel: sid > 0 ? `${sid}服` : '未知',
         name: r.name || r.roleName || `角色${r.roleId}`,
         power: r.power || r.fightingCapacity || 0,
       });

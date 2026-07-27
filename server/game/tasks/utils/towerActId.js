@@ -16,7 +16,7 @@ function getTowerActId(date = new Date()) {
   const friday = new Date(date);
   friday.setDate(date.getDate() - diff);
 
-  const year = friday.getFullYear();
+  const year = String(friday.getFullYear()).slice(-2); // 2位年份，如 25
   const month = String(friday.getMonth() + 1).padStart(2, '0');
   const day2 = String(friday.getDate()).padStart(2, '0');
 

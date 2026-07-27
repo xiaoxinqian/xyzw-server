@@ -86,7 +86,6 @@ function registerDefaultCommands(reg) {
     .register('arena_getarearank')
     .register('store_goodslist', { storeId: 1 })
     .register('store_buy', { goodsId: 1 })
-    .register('store_purchase', { goodsId: 1 })
     .register('store_refresh', { storeId: 1 })
     .register('legion_getinfo')
     .register('legion_signin')
@@ -149,6 +148,7 @@ function registerDefaultCommands(reg) {
     .register('genie_buysweep')
     .register('discount_claimreward', { discountId: 1 })
     .register('collection_claimfreereward')
+    .register('collection_goodslist')
     .register('card_claimreward', { cardId: 1 })
     .register('tower_getinfo')
     .register('tower_claimreward')
@@ -216,17 +216,12 @@ function registerDefaultCommands(reg) {
     .register('towers_start')
     .register('towers_fight')
     .register('system_sendchatmessage')
-    .register('fight_startareaarena')
+    .register('fight_startareaarena', { battleVersion: 240476 })
     .register('fight_startdungeon')
     .register('system_buygold')
     .register('store_purchase')
     .register('presetteam_getinfo')
-    .register('presetteam_setteam')
-    .register('hangup_getinfo')
-    .register('hangup_settotaltime')
-    .register('bottle_getinfo')
-    .register('bottle_reset')
-    .register('bottle_claim');
+    .register('presetteam_setteam');
 
   return reg;
 }

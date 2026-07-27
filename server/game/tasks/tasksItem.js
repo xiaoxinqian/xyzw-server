@@ -22,8 +22,16 @@ function createBatchOpenBox(deps) {
 
     log(`开始开箱: 类型${boxType} ${number}个...`);
     try {
-      await worker.sendMessageWithPromise('item_openbox', { itemId: boxType, number }, 8000);
-      await sleep(500);
+      // 分批开箱，每批10个，避免"操作过快"
+      const batchSize = config.batchSize || 10;
+      let opened = 0;
+      while (opened < number) {
+        const batch = Math.min(batchSize, number - opened);
+        await worker.sendMessageWithPromise('item_openbox', { itemId: boxType, number: batch }, 8000);
+        await sleep(1500);
+        opened += batch;
+        if (opened < number) log(`已开 ${opened}/${number}...`);
+      }
       log(`开箱完成: ${boxType} x${number}`, 'success');
       return { success: true, boxType, number };
     } catch (error) {
@@ -43,7 +51,7 @@ function createBatchClaimBoxPointReward(deps) {
 
     log('开始领取箱积奖励...');
     try {
-      await worker.sendMessageWithPromise('item_claimboxpointreward', {}, 8000);
+      await worker.sendMessageWithPromise('item_batchclaimboxpointreward', {}, 8000);
       await sleep(500);
       log('箱积奖励领取成功', 'success');
       return { success: true, message: '箱积奖励领取完成' };
@@ -66,23 +74,62 @@ function createBatchFish(deps) {
 
     log(`开始钓鱼: 类型${fishType} ${count}次...`);
     try {
-      for (let i = 0; i < count; i++) {
-        log(`钓鱼 ${i + 1}/${count}...`);
+      // 先检查鱼竿库存
+      const roleResp = await worker.sendMessageWithPromise('role_getroleinfo', {}, 10000);
+      const items = roleResp?.rawData?.role?.items || roleResp?.role?.items || {};
+      const rodCount = (items[1011]?.quantity || 0) + (items[1012]?.quantity || 0);
+      const availableCount = Math.min(count, rodCount);
+      log(`鱼竿库存: ${rodCount}, 将钓鱼 ${availableCount} 次`);
+
+      if (availableCount <= 0) {
+        log('鱼竿不足，跳过', 'warning');
+        return { success: false, message: '鱼竿不足' };
+      }
+
+      // 批量钓鱼，每批10条
+      const batchSize = 10;
+      const batches = Math.floor(availableCount / batchSize);
+      const remainder = availableCount % batchSize;
+      let done = 0;
+
+      for (let i = 0; i < batches; i++) {
         try {
           await worker.sendMessageWithPromise('artifact_lottery', {
-            lotteryNumber: 1,
+            lotteryNumber: batchSize,
             newFree: true,
             type: fishType,
           }, 8000);
+          done += batchSize;
+          log(`钓鱼 ${done}/${availableCount}...`);
           await sleep(500);
-          log(`钓鱼 ${i + 1} 成功`, 'success');
+          // 每5批重新校验库存
+          if ((i + 1) % 5 === 0) {
+            try {
+              const r = await worker.sendMessageWithPromise('role_getroleinfo', {}, 5000);
+              const it = r?.rawData?.role?.items || r?.role?.items || {};
+              const left = (it[1011]?.quantity || 0) + (it[1012]?.quantity || 0);
+              if (left <= 0) { log('鱼竿已用完，停止', 'warning'); break; }
+            } catch (_) {}
+          }
         } catch (e) {
-          log(`钓鱼 ${i + 1} 失败: ${e.message}`, 'warning');
+          log(`钓鱼批次 ${i + 1} 失败: ${e.message}`, 'warning');
           break;
         }
       }
-      log('钓鱼完成', 'success');
-      return { success: true, count };
+      if (remainder > 0 && done < availableCount) {
+        try {
+          await worker.sendMessageWithPromise('artifact_lottery', {
+            lotteryNumber: remainder,
+            newFree: true,
+            type: fishType,
+          }, 8000);
+          done += remainder;
+        } catch (e) {
+          log(`钓鱼尾批失败: ${e.message}`, 'warning');
+        }
+      }
+      log(`钓鱼完成: ${done}/${availableCount}`, 'success');
+      return { success: true, count: done };
     } catch (error) {
       log(`钓鱼失败: ${error.message}`, 'error');
       throw error;
@@ -111,15 +158,30 @@ function createBatchRecruit(deps) {
         log(`免费招募失败: ${e.message}`, 'warning');
       }
 
-      // 付费招募
+      // 付费招募（批量10个）
       if (payRecruit) {
-        log('付费招募...');
-        try {
-          await worker.sendMessageWithPromise('hero_recruit', { recruitType: 1, recruitNumber: 1 }, 8000);
-          await sleep(500);
-          log('付费招募成功', 'success');
-        } catch (e) {
-          log(`付费招募失败: ${e.message}`, 'warning');
+        const recruitCount = config.recruitCount || 10;
+        const recruitBatch = 10;
+        const rBatches = Math.floor(recruitCount / recruitBatch);
+        const rRemainder = recruitCount % recruitBatch;
+        log(`付费招募 ${recruitCount} 个...`);
+        for (let i = 0; i < rBatches; i++) {
+          try {
+            await worker.sendMessageWithPromise('hero_recruit', { recruitType: 1, recruitNumber: recruitBatch }, 8000);
+            await sleep(500);
+            log(`付费招募 ${(i + 1) * recruitBatch}/${recruitCount}`, 'success');
+          } catch (e) {
+            log(`付费招募批次 ${i + 1} 失败: ${e.message}`, 'warning');
+            break;
+          }
+        }
+        if (rRemainder > 0) {
+          try {
+            await worker.sendMessageWithPromise('hero_recruit', { recruitType: 1, recruitNumber: rRemainder }, 8000);
+            await sleep(500);
+          } catch (e) {
+            log(`付费招募尾批失败: ${e.message}`, 'warning');
+          }
         }
       }
 
@@ -158,9 +220,12 @@ function createBatchHeroUpgrade(deps) {
             const result = await worker.sendMessageWithPromise('hero_heroupgradestar', { heroId }, 8000);
             await sleep(300);
 
-            if (result?.rawData?.result === false || result?.result === false) {
-              break;
-            }
+            const ok = result && (
+              result?.rawData?.code === 0 || result?.code === 0 ||
+              result?.rawData?.success === true || result?.success === true ||
+              result?.rawData?.result === 0 || result?.result === 0
+            );
+            if (!ok) break;
 
             upgraded++;
             totalUpgrades++;
